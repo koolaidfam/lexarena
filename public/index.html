@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lex Arena — Train legal reasoning on real documents</title>
+<meta name="description" content="Upload a legal PDF and turn it into interactive legal training rounds. For legal education and training only.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;0,700;1,500;1,600&family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="seal-bg"></div>
+<div id="app">
+
+  <div class="topbar">
+    <button class="brandmark" onclick="go('dashboard')">
+      <svg class="gavel" viewBox="0 0 24 24" fill="none" stroke="var(--brass)" stroke-width="1.6"><path d="M14 3l7 7-3 3-7-7zM10.5 6.5L3 14l4 4 7.5-7.5M2 22h10"/></svg>
+      Lex Arena
+    </button>
+    <nav class="nav">
+      <button onclick="go('dashboard')">Home</button>
+      <button onclick="go('upload')">New Round</button>
+      <button onclick="openHistory()">History</button>
+      <span class="tag" id="ai-tag">Engine</span>
+    </nav>
+  </div>
+
+  <!-- =================== DASHBOARD =================== -->
+  <section id="screen-dashboard" class="screen active">
+    <div class="hero">
+      <p class="eyebrow">Upload · Train · Be challenged</p>
+      <h1>Turn any legal document into a <em>training round</em>.</h1>
+      <p class="sub">Upload a contract, case file, memo, policy or statute excerpt. Lex Arena reads it and builds interactive legal challenges — then scores your reasoning and tells you exactly where it broke.</p>
+      <div class="cta-row">
+        <button class="btn big" onclick="go('upload')">Upload a document</button>
+        <button class="btn ghost big" onclick="startDemo()">Try the demo brief</button>
+      </div>
+    </div>
+
+    <div class="cards3">
+      <div class="card"><div class="n">01 / Upload</div><h3>Bring the real thing</h3><p class="muted">Drag in a PDF. We extract the text on the server and never store the document.</p></div>
+      <div class="card"><div class="n">02 / Train</div><h3>Pick your mode</h3><p class="muted">Issue spotting, clause analysis, compliance review, or cross-examination under pressure.</p></div>
+      <div class="card"><div class="n">03 / Improve</div><h3>Score &amp; review</h3><p class="muted">Get points, model answers and specific feedback grounded in the document.</p></div>
+    </div>
+
+    <div class="recent-row">
+      <h2 style="font-size:1.6rem">Recent rounds</h2>
+      <button class="backlink" onclick="openHistory()">View all →</button>
+    </div>
+    <div class="session-list" id="dash-recent"><div class="empty">No rounds yet. Upload a document to begin.</div></div>
+
+    <p class="disclaimer">This tool is for legal education and training only. It does not provide legal advice.</p>
+  </section>
+
+  <!-- =================== UPLOAD =================== -->
+  <section id="screen-upload" class="screen">
+    <button class="backlink" onclick="go('dashboard')">← Back</button>
+    <p class="eyebrow" style="margin-top:1rem">New round</p>
+    <h1 style="font-size:2.4rem;margin-bottom:.4rem">Upload your bundle of PDFs.</h1>
+    <p class="muted" style="margin-bottom:1.2rem">Upload separate PDFs for the factual record and each side's case. PDF only, up to 10&nbsp;MB per file.</p>
+
+    <div class="notice">
+      <span class="ico">⚖</span>
+      <div><b>Confidentiality.</b> Your document is processed in memory to extract text and is never written to disk or saved to our database. Only generated training data, such as the scenario outline, source summaries, transcript and debrief, is stored. Do not upload privileged material you are not authorised to share. <b>This tool is for legal education and training only — it does not provide legal advice.</b></div>
+    </div>
+
+    <div class="upload-grid">
+      <div class="upload-slot card">
+        <div class="slot-head">
+          <h3>Case Facts</h3>
+          <p class="muted">Required. Upload the factual record, agreed facts, chronology, or case file.</p>
+        </div>
+        <div class="drop bucket-drop" id="drop-caseFacts" tabindex="0" role="button" aria-label="Upload the Case Facts PDF">
+          <div class="big-ico">⇪</div>
+          <h3>Upload Case Facts</h3>
+          <p class="muted">Drag a PDF here or click to choose</p>
+          <input type="file" id="fileIn-caseFacts" accept="application/pdf,.pdf" style="display:none">
+        </div>
+        <div id="fileArea-caseFacts" style="display:none">
+          <div class="file-chip">
+            <div><div class="fc-name" id="fc-name-caseFacts"></div><div class="fc-size" id="fc-size-caseFacts"></div></div>
+            <button class="backlink" onclick="clearUploadBucket('caseFacts')">Remove</button>
+          </div>
+          <div class="progress"><span id="upbar-caseFacts"></span></div>
+          <div class="preview" id="preview-caseFacts"></div>
+          <div class="faint upload-meta" id="extractMeta-caseFacts"></div>
+        </div>
+      </div>
+
+      <div class="upload-slot card">
+        <div class="slot-head">
+          <h3>Claimant's Arguments</h3>
+          <p class="muted">Optional but recommended. Upload the claimant or appellant written case.</p>
+        </div>
+        <div class="drop bucket-drop" id="drop-claimantArguments" tabindex="0" role="button" aria-label="Upload the Claimant's Arguments PDF">
+          <div class="big-ico">⇪</div>
+          <h3>Upload Claimant's Arguments</h3>
+          <p class="muted">Drag a PDF here or click to choose</p>
+          <input type="file" id="fileIn-claimantArguments" accept="application/pdf,.pdf" style="display:none">
+        </div>
+        <div id="fileArea-claimantArguments" style="display:none">
+          <div class="file-chip">
+            <div><div class="fc-name" id="fc-name-claimantArguments"></div><div class="fc-size" id="fc-size-claimantArguments"></div></div>
+            <button class="backlink" onclick="clearUploadBucket('claimantArguments')">Remove</button>
+          </div>
+          <div class="progress"><span id="upbar-claimantArguments"></span></div>
+          <div class="preview" id="preview-claimantArguments"></div>
+          <div class="faint upload-meta" id="extractMeta-claimantArguments"></div>
+        </div>
+      </div>
+
+      <div class="upload-slot card">
+        <div class="slot-head">
+          <h3>Respondent's Arguments</h3>
+          <p class="muted">Optional but recommended. Upload the respondent or appellee written case.</p>
+        </div>
+        <div class="drop bucket-drop" id="drop-respondentArguments" tabindex="0" role="button" aria-label="Upload the Respondent's Arguments PDF">
+          <div class="big-ico">⇪</div>
+          <h3>Upload Respondent's Arguments</h3>
+          <p class="muted">Drag a PDF here or click to choose</p>
+          <input type="file" id="fileIn-respondentArguments" accept="application/pdf,.pdf" style="display:none">
+        </div>
+        <div id="fileArea-respondentArguments" style="display:none">
+          <div class="file-chip">
+            <div><div class="fc-name" id="fc-name-respondentArguments"></div><div class="fc-size" id="fc-size-respondentArguments"></div></div>
+            <button class="backlink" onclick="clearUploadBucket('respondentArguments')">Remove</button>
+          </div>
+          <div class="progress"><span id="upbar-respondentArguments"></span></div>
+          <div class="preview" id="preview-respondentArguments"></div>
+          <div class="faint upload-meta" id="extractMeta-respondentArguments"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="upErr"></div>
+
+    <div id="extractDone" style="display:none">
+      <div class="card">
+        <h3 style="margin-bottom:.7rem">Bundle Ready</h3>
+        <div class="preview" id="bundlePreview"></div>
+        <div class="spread" style="margin-top:1.2rem">
+          <span class="faint" id="extractMeta" style="font-family:var(--mono);font-size:.72rem"></span>
+          <div class="cta-row">
+            <button class="btn ghost" onclick="resetUpload()">Clear all</button>
+            <button class="btn big" onclick="go('modes')">Choose training mode →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================== MODE SELECT =================== -->
+  <section id="screen-modes" class="screen">
+    <button class="backlink" onclick="go('upload')">← Back to upload</button>
+    <p class="eyebrow" style="margin-top:1rem">Set the round</p>
+    <h1 style="font-size:2.4rem;margin-bottom:.3rem" id="modes-title">Configure your round.</h1>
+    <p class="muted" id="modes-doc"></p>
+
+    <div class="card" style="margin-top:1.4rem">
+      <div class="setup-form">
+        <div class="field">
+          <label for="sel-opponent">Opponent Type</label>
+          <select id="sel-opponent" class="select"></select>
+        </div>
+        <div class="field">
+          <label for="sel-persona">Persona</label>
+          <select id="sel-persona" class="select"></select>
+        </div>
+        <div class="field">
+          <label for="sel-duration">Duration</label>
+          <select id="sel-duration" class="select"></select>
+        </div>
+        <div class="field">
+          <label for="sel-difficulty">Difficulty</label>
+          <select id="sel-difficulty" class="select"></select>
+        </div>
+        <div class="field">
+          <label for="sel-mode">Question Type</label>
+          <select id="sel-mode" class="select"></select>
+        </div>
+      </div>
+      <p class="muted" id="mode-blurb" style="font-size:.88rem;margin:.4rem 0 0"></p>
+    </div>
+
+    <hr class="rule">
+    <div class="setup-foot spread">
+      <span class="faint" id="modeSummary" style="font-family:var(--mono);font-size:.72rem;letter-spacing:.08em"></span>
+      <button class="btn big" id="genBtn" onclick="createSession()">Generate round</button>
+    </div>
+  </section>
+
+  <!-- =================== LIVE HOT SEAT =================== -->
+  <section id="screen-game" class="screen">
+    <div class="live-grid">
+      <!-- case materials -->
+      <div class="panel panel-side">
+        <div class="panel-h">Case materials</div>
+        <div class="panel-b">
+          <details open><summary>Uploaded materials</summary><div id="lv-materials" class="material-list"></div></details>
+          <details open><summary>Issue</summary><p class="mtxt" id="lv-issue"></p></details>
+          <details open><summary>Your position</summary><p class="mtxt" id="lv-position"></p></details>
+          <details><summary>Claimant/Appellant material</summary><p class="mtxt" id="lv-claimantCase"></p></details>
+          <details><summary>Respondent/Appellee material</summary><p class="mtxt" id="lv-respondentCase"></p></details>
+          <details open><summary>Facts</summary><ul id="lv-facts"></ul></details>
+          <details open><summary>Authorities</summary><ul id="lv-auth"></ul></details>
+          <details><summary>Opponent's case</summary><p class="mtxt" id="lv-opp"></p></details>
+          <details><summary>Danger points</summary><ul id="lv-danger" class="danger-list"></ul></details>
+        </div>
+      </div>
+
+      <!-- argument transcript -->
+      <div class="panel">
+        <div class="panel-h spread"><span id="lv-personaLabel">The bench</span><span class="tag" id="lv-modeTag"></span></div>
+        <div class="panel-b" id="transcript"></div>
+        <div class="input-dock">
+          <textarea id="answerInput" placeholder="Respond to the bench…" onkeydown="answerKey(event)"></textarea>
+          <button class="mic" id="micBtn" title="Push to talk" onclick="toggleMic()" aria-label="Push to talk">🎙</button>
+          <button class="btn" id="sendBtn" onclick="submitMessage()">Answer</button>
+        </div>
+      </div>
+
+      <!-- the record -->
+      <div class="panel panel-side">
+        <div class="panel-h">The record</div>
+        <div class="panel-b">
+          <div class="ind"><div class="lbl">Time remaining</div><div class="clock" id="lv-clock">10:00</div></div>
+          <div class="ind"><div class="lbl">Bench pressure</div><div class="gauge"><span id="lv-pressure"></span></div></div>
+          <div class="ind"><div class="lbl">Current attack</div><div class="val" id="lv-attack">—</div></div>
+          <div class="ind"><div class="lbl">Unanswered issue</div><div class="val" id="lv-unanswered">—</div></div>
+          <div class="ind"><div class="lbl">Current topic</div><div class="val" id="lv-topic">Opening</div></div>
+          <div class="ind"><div class="lbl">Exchanges</div><div class="val" id="lv-exchanges">0</div></div>
+          <div class="ind" style="margin-top:1.2rem"><button class="btn danger" style="width:100%" onclick="finishRound()">End &amp; score round</button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- =================== RESULTS / DEBRIEF =================== -->
+  <section id="screen-results" class="screen">
+    <button class="backlink" onclick="go('dashboard')">← Home</button>
+    <p class="eyebrow" style="margin-top:1rem">Debrief</p>
+    <div class="score-hero">
+      <div class="bigscore" id="db-score">—<small>/100</small></div>
+      <div class="diag" id="db-diag"></div>
+    </div>
+
+    <div class="card" style="margin:1.4rem 0">
+      <h4 style="font-family:var(--mono);font-size:.66rem;letter-spacing:.22em;text-transform:uppercase;color:var(--brass);margin:0 0 1rem">Subscores</h4>
+      <div class="subs" id="db-subs"></div>
+    </div>
+
+    <h2 style="font-size:1.7rem;margin:2rem 0 1rem">Specific feedback</h2>
+    <div id="db-feedback"></div>
+
+    <div id="db-turning" style="display:none">
+      <h2 style="font-size:1.7rem;margin:2rem 0 1rem">The moment the round turned</h2>
+      <div class="card">
+        <div class="replay-q" id="tp-question"></div>
+        <div class="better"><b>Your answer</b><span id="tp-answer"></span></div>
+        <p class="muted" id="tp-why" style="margin-top:.8rem"></p>
+        <div class="better" style="border-color:var(--verdigris)"><b style="color:var(--verdigris)">Stronger answer</b><span id="tp-stronger"></span></div>
+      </div>
+    </div>
+
+    <hr class="rule">
+    <div class="spread">
+      <button class="btn big" onclick="go('upload')">Train another document</button>
+      <button class="btn ghost big" onclick="openHistory()">View history</button>
+    </div>
+    <p class="disclaimer">This tool is for legal education and training only. It does not provide legal advice.</p>
+  </section>
+
+  <!-- =================== HISTORY =================== -->
+  <section id="screen-history" class="screen">
+    <button class="backlink" onclick="go('dashboard')">← Home</button>
+    <p class="eyebrow" style="margin-top:1rem">Session history</p>
+    <h1 style="font-size:2.2rem;margin-bottom:1.2rem">Your previous rounds.</h1>
+    <div class="session-list" id="hist-list"><div class="empty">Loading…</div></div>
+  </section>
+
+</div>
+
+<div class="overlay" id="overlay">
+  <div>
+    <div class="spinner"></div>
+    <div class="ov-title" id="ovTitle">Working</div>
+    <div class="ov-line" id="ovLine"></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

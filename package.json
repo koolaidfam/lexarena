@@ -1,0 +1,27 @@
+{
+  "name": "lex-arena",
+  "version": "1.0.0",
+  "description": "Lex Arena - turn real legal PDFs into interactive legal training rounds.",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "seed": "node server/seed.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "legal",
+    "training",
+    "education",
+    "pdf"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "multer": "^2.2.0",
+    "pdf-parse": "^1.1.1"
+  }
+}
