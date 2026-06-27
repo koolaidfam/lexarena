@@ -410,53 +410,9 @@ function answerKey(e) {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitMessage(); }
 }
 
-let sending = false;
-let sendWhenRecordingStops = false;
-async function submitMessage() {
-  if (sending) return;
-  sendWhenRecordingStops = false;
-  const inp = document.getElementById('answerInput');
-  const txt = inp.value.trim();
-  if (!txt) { toast('Say something to the bench first.'); return; }
-  if (State.session.status === 'completed') { toast('This round is already complete.'); return; }
-
-  sending = true;
-  setSending(true);
-  inp.value = '';
-  if (recording) stopMic();
-
-  addUtt('advocate', txt, null);
-  State.session.transcript.push({ role: 'advocate', text: txt });
-  updateExchanges();
-
-  const typing = addUtt('sys', 'The bench is considering…', null);
-  typing.classList.add('typing');
-
-  try {
-    const r = await api(`/api/sessions/${State.session.id}/turn`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: txt }),
-    });
-    typing.remove();
-    addUtt('bench', r.bench.text, r.bench.attackType);
-    State.session.transcript.push({ role: 'bench', ...r.bench, text: r.bench.text });
-    setIndicators(r.bench);
-  } catch (e) {
-    typing.remove();
-    toast(e.message);
-    // restore the unsent message so it isn't lost
-    inp.value = txt;
-    State.session.transcript.pop();
-    updateExchanges();
-  } finally {
-    sending = false;
-    setSending(false);
-    inp.focus();
-  }
-}
-
 function setSending(b) {
   const btn = document.getElementById('sendBtn');
+  if (!btn) return;
   btn.disabled = b;
   btn.textContent = b ? '…' : 'Answer';
 }
@@ -485,7 +441,8 @@ async function finishRound() {
   const exchanges = (s.transcript || []).filter((x) => x.role === 'advocate').length;
   if (exchanges === 0) { toast('Make at least one submission before ending.'); return; }
   stopClock();
-  if (recording) stopMic();
+  if (RT.active) stopRealtime(false); // end round — no auto-send
+  if (RT.synth) RT.synth.cancel();
   const used = (s.minutes || 10) * 60 - Math.max(0, State.secondsLeft);
   showOverlay('Scoring your round…', ['Reading the transcript', 'Weighing your answers', 'Finding the turning point', 'Writing your debrief']);
   try {
@@ -737,61 +694,405 @@ function fillList(id, arr) {
 }
 
 /* ============================================================
- * Speech — push to talk (Web Speech API)
+ * Real-time Speech Pipeline
+ *
+ * Flow:
+ *   Mic ON  →  SpeechRecognition (continuous, interim)
+ *           →  Live transcript ticker updates every token
+ *           →  Eval loop fires every EVAL_INTERVAL_MS via server
+ *           →  Signals (interestingness / confidence / urgency / topic)
+ *           →  Interrupt policy applied
+ *           →  shouldInterrupt? → show interrupt banner OR keep going
+ *   Send    →  POST /stream-bench (SSE) → bench tokens streamed in
+ *           →  Voice feedback via Web Speech Synthesis
  * ============================================================ */
-let recog = null;
-let recording = false;
+
+const RT = {
+  recog: null,          // SpeechRecognition instance
+  active: false,        // is the mic live?
+  finalText: '',        // committed final transcript so far this turn
+  interimText: '',      // latest interim (not yet committed)
+  evalTimer: null,      // setInterval handle for periodic evaluation
+  lastEval: null,       // most recent evaluation result from the server
+  interruptShown: false,// is the interrupt banner currently showing?
+  sending: false,       // is a bench response in flight?
+  streamingEl: null,    // the DOM element receiving streaming tokens
+  synth: window.speechSynthesis || null,
+};
+
+const EVAL_INTERVAL_MS = 6000; // evaluate transcript every 6 seconds (realistic for oral argument)
+
+/* ---------- init ---------- */
 function initSpeech() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const btn = document.getElementById('micBtn');
-  if (!SR) { if (btn) btn.style.display = 'none'; return; }
-  recog = new SR();
-  recog.continuous = true;
-  recog.interimResults = true;
-  recog.lang = 'en-GB';
-  let base = '';
-  recog.onstart = () => { base = document.getElementById('answerInput').value; };
-  recog.onresult = (e) => {
-    let interim = '', final = '';
+  if (!SR) {
+    const btn = document.getElementById('micBtn');
+    if (btn) {
+      btn.title = 'Speech not supported in this browser — type your answer';
+      btn.style.opacity = '0.4';
+      btn.style.cursor = 'not-allowed';
+    }
+    setRtStatus('Type your response below');
+    return;
+  }
+
+  RT.recog = new SR();
+  RT.recog.continuous = true;
+  RT.recog.interimResults = true;
+  RT.recog.lang = 'en-GB';
+
+  RT.recog.onstart = () => {
+    setRtStatus('Listening…');
+    startEvalLoop();
+  };
+
+  RT.recog.onresult = (e) => {
+    let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const r = e.results[i];
-      if (r.isFinal) final += r[0].transcript; else interim += r[0].transcript;
+      if (r.isFinal) {
+        RT.finalText += ' ' + r[0].transcript;
+      } else {
+        interim += r[0].transcript;
+      }
     }
-    document.getElementById('answerInput').value = (base + ' ' + final + interim).trim();
+    RT.interimText = interim;
+    const full = (RT.finalText + ' ' + interim).trim();
+    // Mirror into the text area so the user can see / edit
+    document.getElementById('answerInput').value = full;
+    // Update the live ticker
+    const tickEl = document.getElementById('rtTickText');
+    if (tickEl) tickEl.textContent = full || '—';
+    animateWave(true);
   };
-  recog.onerror = (ev) => { sendWhenRecordingStops = false; toast('Microphone: ' + ev.error + '. Type your answer instead.'); stopMic(); };
-  recog.onend = () => {
-    if (recording) {
-      try { recog.start(); } catch (_) { /* */ }
-      return;
-    }
-    if (sendWhenRecordingStops) {
-      sendWhenRecordingStops = false;
-      submitMessage();
+
+  RT.recog.onerror = (ev) => {
+    if (ev.error === 'no-speech') return; // normal silence — ignore
+    toast('Microphone: ' + ev.error + '. Type below instead.');
+    stopRealtime();
+  };
+
+  RT.recog.onend = () => {
+    // Auto-restart if we are still supposed to be live
+    if (RT.active) {
+      try { RT.recog.start(); } catch (_) { /* already starting */ }
+    } else {
+      stopEvalLoop();
+      animateWave(false);
+      setRtStatus('Press 🎙 to speak');
     }
   };
 }
-function toggleMic() {
-  if (recording) {
-    stopMic(true);
+
+/* ---------- toggle ---------- */
+function toggleRealtime() {
+  if (RT.active) {
+    stopRealtime(true); // true = auto-send on stop
   } else {
-    startMic();
+    startRealtime();
   }
 }
-function startMic() {
-  if (!recog) { toast('Speech input is not supported in this browser. Type instead.'); return; }
-  sendWhenRecordingStops = false;
-  recording = true;
+
+function startRealtime() {
+  if (!RT.recog) { toast('Speech not supported — type your answer below.'); return; }
+  if (RT.sending) { toast('Wait for the bench to finish.'); return; }
+  RT.active = true;
+  RT.finalText = '';
+  RT.interimText = '';
+  RT.interruptShown = false;
+  document.getElementById('answerInput').value = '';
+  const tickEl = document.getElementById('rtTickText');
+  if (tickEl) tickEl.textContent = '—';
+  resetMeters();
+  dismissInterrupt();
   document.getElementById('micBtn').classList.add('rec');
-  try { recog.start(); } catch (_) { /* already started */ }
+  document.getElementById('rtHud').classList.add('active');
+  try { RT.recog.start(); } catch (_) { /* already started */ }
 }
-function stopMic(sendAfterStop = false) {
-  sendWhenRecordingStops = sendAfterStop;
-  recording = false;
-  const btn = document.getElementById('micBtn');
-  if (btn) btn.classList.remove('rec');
-  if (recog) { try { recog.stop(); } catch (_) { /* */ } }
+
+function stopRealtime(autoSend = false) {
+  RT.active = false;
+  stopEvalLoop();
+  dismissInterrupt();
+  document.getElementById('micBtn').classList.remove('rec');
+  document.getElementById('rtHud').classList.remove('active');
+  animateWave(false);
+
+  // Capture everything spoken before the recogniser fully stops
+  const capturedText = (RT.finalText + ' ' + RT.interimText).trim();
+
+  if (RT.recog) { try { RT.recog.stop(); } catch (_) { /* */ } }
+
+  if (autoSend && capturedText && !RT.sending) {
+    setRtStatus('Sending…');
+    submitStreamMessage(capturedText);
+  } else {
+    setRtStatus('Press 🎙 to speak');
+  }
 }
+
+/* ---------- evaluation loop ---------- */
+function startEvalLoop() {
+  stopEvalLoop();
+  RT.evalTimer = setInterval(runEval, EVAL_INTERVAL_MS);
+}
+function stopEvalLoop() {
+  clearInterval(RT.evalTimer);
+  RT.evalTimer = null;
+}
+
+async function runEval() {
+  if (!State.session || RT.sending) return;
+  const transcript = (RT.finalText + ' ' + RT.interimText).trim();
+  if (!transcript || transcript.split(/\s+/).length < 4) return;
+
+  try {
+    const result = await api(`/api/sessions/${State.session.id}/evaluate-transcript`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ transcript }),
+    });
+    RT.lastEval = result;
+    updateMeters(result);
+    applyInterruptPolicy(result, transcript);
+  } catch { /* network hiccup — skip this tick */ }
+}
+
+/* ---------- meters ---------- */
+function updateMeters(ev) {
+  setMeter('mInterest', 'mInterestVal', ev.interestingness);
+  setMeter('mConfid', 'mConfidVal', ev.confidence);
+  setMeter('mUrgency', 'mUrgencyVal', ev.urgency);
+  const topicEl = document.getElementById('mTopic');
+  if (topicEl) topicEl.textContent = ev.topic || '—';
+  // Colour urgency fill: green → amber → red
+  const urgEl = document.getElementById('mUrgency');
+  if (urgEl) {
+    urgEl.style.background = ev.urgency > 0.65
+      ? 'var(--oxblood)'
+      : ev.urgency > 0.4
+        ? 'var(--brass)'
+        : 'var(--verdigris)';
+  }
+}
+
+function setMeter(fillId, valId, ratio) {
+  const fill = document.getElementById(fillId);
+  const val = document.getElementById(valId);
+  if (fill) fill.style.width = Math.round((ratio || 0) * 100) + '%';
+  if (val) val.textContent = Math.round((ratio || 0) * 100) + '%';
+}
+
+function resetMeters() {
+  ['mInterest', 'mConfid', 'mUrgency'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.style.width = '0%';
+  });
+  ['mInterestVal', 'mConfidVal', 'mUrgencyVal'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '—';
+  });
+  const topicEl = document.getElementById('mTopic');
+  if (topicEl) topicEl.textContent = '—';
+}
+
+/* ---------- interrupt policy ---------- */
+function applyInterruptPolicy(ev, transcript) {
+  if (RT.interruptShown) return; // already interrupted this turn
+  if (!ev.shouldInterrupt) return;
+  if (transcript.split(/\s+/).length < 8) return; // too short to be worth sending
+
+  // The bench cuts in: stop the mic immediately and fire the bench response.
+  RT.interruptShown = true;
+  showInterruptNotice(ev.interruptReason);
+  stopRealtime(false);          // stop mic — no auto-send from stopRealtime
+  submitStreamMessage(transcript); // bench response IS the interruption
+}
+
+// Read-only notification strip — no buttons, auto-dismisses once the bench response arrives.
+function showInterruptNotice(reason) {
+  const box = document.getElementById('rtInterrupt');
+  const reasonEl = document.getElementById('rtIntReason');
+  if (box) box.style.display = 'flex';
+  if (reasonEl) reasonEl.textContent = reason || 'The bench cuts in';
+}
+
+function dismissInterrupt() {
+  RT.interruptShown = false;
+  const box = document.getElementById('rtInterrupt');
+  if (box) box.style.display = 'none';
+}
+
+/* ---------- submit via SSE streaming ---------- */
+async function submitMessage() {
+  if (RT.sending) return;
+  const inp = document.getElementById('answerInput');
+  const txt = inp.value.trim();
+  if (!txt) { toast('Say or type something first.'); return; }
+  if (State.session?.status === 'completed') { toast('This round is already complete.'); return; }
+  stopRealtime(false); // don't auto-send — we send below with the captured text
+  await submitStreamMessage(txt);
+}
+
+async function submitStreamMessage(txt) {
+  if (RT.sending) return;
+  RT.sending = true;
+  setSending(true);
+  document.getElementById('answerInput').value = '';
+  const tickEl = document.getElementById('rtTickText');
+  if (tickEl) tickEl.textContent = '—';
+  resetMeters();
+
+  // Show advocate turn immediately
+  addUtt('advocate', txt, null);
+  State.session.transcript.push({ role: 'advocate', text: txt });
+  updateExchanges();
+
+  // Streaming bench response
+  const benchEl = addStreamingUtt();
+  let finalBench = null;
+
+  try {
+    await new Promise((resolve, reject) => {
+      // Use fetch + ReadableStream to consume the SSE
+      fetch(`/api/sessions/${State.session.id}/stream-bench`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: txt }),
+      }).then(async (res) => {
+        if (!res.ok) {
+          let err = {};
+          try { err = await res.json(); } catch { /* */ }
+          reject(new Error(err.error || 'Bench failed to respond.'));
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let lastTokenText = '';
+
+        const pump = async () => {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) { resolve(); return; }
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // keep incomplete line
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('event:')) continue;
+              if (!trimmed.startsWith('data:')) continue;
+              const jsonStr = trimmed.slice(5).trim();
+              try {
+                const ev = JSON.parse(jsonStr);
+                if (ev.text !== undefined) {
+                  // Streaming token — update the bench bubble in real time
+                  lastTokenText = ev.text;
+                  updateStreamingUtt(benchEl, ev.text);
+                  if (ev.done) speakText(ev.text);
+                }
+                if (ev.bench) {
+                  // Final event with full metadata
+                  finalBench = ev.bench;
+                  finaliseStreamingUtt(benchEl, ev.bench);
+                  State.session.transcript.push({ role: 'bench', ...ev.bench, text: ev.bench.text });
+                  setIndicators(ev.bench);
+                  resolve();
+                }
+                if (ev.message) {
+                  reject(new Error(ev.message));
+                }
+              } catch { /* malformed SSE — skip */ }
+            }
+          }
+        };
+        pump().catch(reject);
+      }).catch(reject);
+    });
+  } catch (e) {
+    benchEl.remove();
+    // Restore the unsent text
+    document.getElementById('answerInput').value = txt;
+    State.session.transcript.pop();
+    updateExchanges();
+    toast(e.message);
+  } finally {
+    RT.sending = false;
+    setSending(false);
+    dismissInterrupt(); // clear the interrupt notice now that the bench has spoken
+    setRtStatus('Press 🎙 to speak');
+  }
+}
+
+/* ---------- streaming utterance helpers ---------- */
+function addStreamingUtt() {
+  const t = document.getElementById('transcript');
+  const el = document.createElement('div');
+  const label = (State.session.persona + ' ' + State.session.opponent);
+  el.className = 'utt bench streaming';
+  el.innerHTML = `<div class="who">${escapeHtml(label)}</div><div class="bubble"><span class="stream-cursor">█</span></div>`;
+  t.appendChild(el);
+  t.scrollTop = t.scrollHeight;
+  RT.streamingEl = el;
+  return el;
+}
+
+function updateStreamingUtt(el, text) {
+  const bubble = el.querySelector('.bubble');
+  if (!bubble) return;
+  bubble.innerHTML = escapeHtml(text) + '<span class="stream-cursor">█</span>';
+  const t = document.getElementById('transcript');
+  t.scrollTop = t.scrollHeight;
+}
+
+function finaliseStreamingUtt(el, bench) {
+  el.classList.remove('streaming');
+  const bubble = el.querySelector('.bubble');
+  if (bubble) bubble.innerHTML = escapeHtml(bench.text);
+  // Add attack pill
+  const who = el.querySelector('.who');
+  if (who && bench.attackType) {
+    who.innerHTML = escapeHtml(State.session.persona + ' ' + State.session.opponent) +
+      ` <span class="attack-pill">${escapeHtml(bench.attackType)}</span>`;
+  }
+  const t = document.getElementById('transcript');
+  t.scrollTop = t.scrollHeight;
+}
+
+/* ---------- voice feedback (TTS) ---------- */
+function speakText(text) {
+  if (!RT.synth || !text) return;
+  // Don't speak if user is actively typing / mic is on
+  if (RT.active) return;
+  RT.synth.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.rate = 1.05;
+  utt.pitch = 0.9;
+  utt.lang = 'en-GB';
+  // Choose a voice that sounds authoritative if available
+  const voices = RT.synth.getVoices();
+  const preferred = voices.find((v) => /Daniel|Google UK English Male|en-GB/i.test(v.name + v.lang));
+  if (preferred) utt.voice = preferred;
+  RT.synth.speak(utt);
+}
+
+/* ---------- waveform animation ---------- */
+function animateWave(active) {
+  const wave = document.getElementById('rtWave');
+  if (!wave) return;
+  if (active) wave.classList.add('live'); else wave.classList.remove('live');
+}
+
+/* ---------- status label ---------- */
+function setRtStatus(msg) {
+  const el = document.getElementById('rtStatus');
+  if (el) el.textContent = msg;
+}
+
+/* ---------- legacy compatibility shims ---------- */
+// These were referenced by the old push-to-talk system and by finishRound().
+function stopMic() { stopRealtime(); }
+let recording = false; // kept so finishRound() guard still compiles
 
 init();
 initSpeech();

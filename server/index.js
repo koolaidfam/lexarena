@@ -12,6 +12,7 @@ import {
   modeList, aiEnabled, MODES,
   configOptions, durationToMinutes, OPPONENTS, PERSONAS, DIFFICULTIES, DURATIONS,
   buildScenario, benchTurn, debrief, buildSummary,
+  evaluateTranscript, streamBenchTurn,
 } from './generator.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -303,6 +304,92 @@ app.post('/api/sessions/:id/turn', async (req, res) => {
       topic: bench.topic,
     },
   });
+});
+
+// 4b) Real-time transcript evaluation (called every ~1 s while advocate is speaking)
+app.post('/api/sessions/:id/evaluate-transcript', async (req, res) => {
+  const s = db.prepare('SELECT * FROM sessions WHERE id=?').get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session not found.' });
+  if (s.status === 'completed') return res.status(409).json({ error: 'Round already complete.' });
+
+  const partial = typeof req.body?.transcript === 'string' ? req.body.transcript.trim() : '';
+  if (!partial) return res.json({ interestingness: 0.5, confidence: 0.5, urgency: 0, topic: '—', shouldInterrupt: false, interruptReason: '' });
+
+  const scenario = JSON.parse(s.scenario);
+  const opts = { mode: s.mode, opponent: s.opponent, persona: s.persona, difficulty: s.difficulty };
+  const history = db.prepare('SELECT role,text,bench_pressure FROM turns WHERE session_id=? ORDER BY ordinal').all(req.params.id);
+
+  try {
+    const eval_ = await evaluateTranscript(scenario, opts, history, partial);
+    res.json(eval_);
+  } catch (e) {
+    console.error('[eval-transcript]', e.message);
+    res.json({ interestingness: 0.5, confidence: 0.5, urgency: 0, topic: '—', shouldInterrupt: false, interruptReason: '' });
+  }
+});
+
+// 4c) Streaming bench turn — SSE stream of bench response tokens
+app.post('/api/sessions/:id/stream-bench', async (req, res) => {
+  const s = db.prepare('SELECT * FROM sessions WHERE id=?').get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session not found.' });
+  if (s.status === 'completed') return res.status(409).json({ error: 'Round already complete.' });
+
+  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+  if (!message) return res.status(400).json({ error: 'No message.' });
+  if (message.length > 6000) return res.status(400).json({ error: 'Message too long.' });
+
+  const scenario = JSON.parse(s.scenario);
+  const opts = { mode: s.mode, opponent: s.opponent, persona: s.persona, difficulty: s.difficulty };
+  const history = db.prepare('SELECT role,text,attack_type,bench_pressure FROM turns WHERE session_id=? ORDER BY ordinal').all(req.params.id);
+
+  // Record advocate's turn immediately
+  const nextOrdinal = (db.prepare('SELECT MAX(ordinal) m FROM turns WHERE session_id=?').get(req.params.id).m ?? -1) + 1;
+  const now = new Date().toISOString();
+  const insertTurn = db.prepare(`
+    INSERT INTO turns (id,session_id,ordinal,role,text,attack_type,bench_pressure,unanswered,topic,created_at)
+    VALUES (@id,@session_id,@ordinal,@role,@text,@attack_type,@bench_pressure,@unanswered,@topic,@created_at)`);
+  insertTurn.run({
+    id: randomUUID(), session_id: req.params.id, ordinal: nextOrdinal, role: 'advocate',
+    text: message, attack_type: null, bench_pressure: null, unanswered: null, topic: null, created_at: now,
+  });
+
+  // Set up SSE
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+
+  let bench;
+  try {
+    bench = await streamBenchTurn(scenario, opts, history, message, (partial, isDone) => {
+      send('token', { text: partial, done: isDone });
+    });
+  } catch (e) {
+    console.error('[stream-bench]', e.message);
+    send('error', { message: 'The bench could not respond just now.' });
+    res.end();
+    return;
+  }
+
+  // Persist final bench turn
+  insertTurn.run({
+    id: randomUUID(), session_id: req.params.id, ordinal: nextOrdinal + 1, role: 'bench',
+    text: bench.say, attack_type: bench.attackType, bench_pressure: bench.benchPressure,
+    unanswered: bench.unanswered, topic: bench.topic, created_at: new Date().toISOString(),
+  });
+
+  send('done', {
+    bench: {
+      text: bench.say,
+      attackType: bench.attackType,
+      benchPressure: bench.benchPressure,
+      unanswered: bench.unanswered,
+      topic: bench.topic,
+    },
+  });
+  res.end();
 });
 
 // 5) Complete the round -> debrief (score + coaching)

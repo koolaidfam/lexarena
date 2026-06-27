@@ -214,10 +214,59 @@
       <div class="panel">
         <div class="panel-h spread"><span id="lv-personaLabel">The bench</span><span class="tag" id="lv-modeTag"></span></div>
         <div class="panel-b" id="transcript"></div>
-        <div class="input-dock">
-          <textarea id="answerInput" placeholder="Respond to the bench…" onkeydown="answerKey(event)"></textarea>
-          <button class="mic" id="micBtn" title="Push to talk" onclick="toggleMic()" aria-label="Push to talk">🎙</button>
-          <button class="btn" id="sendBtn" onclick="submitMessage()">Answer</button>
+
+        <!-- ── Real-time speech HUD ── -->
+        <div class="rt-hud" id="rtHud" aria-live="polite">
+          <!-- Waveform + mic status bar -->
+          <div class="rt-bar">
+            <button class="mic" id="micBtn" title="Start real-time listening" onclick="toggleRealtime()" aria-label="Start real-time listening">🎙</button>
+            <div class="rt-wave" id="rtWave" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span>
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <span class="rt-status" id="rtStatus">Press 🎙 to speak</span>
+          </div>
+
+          <!-- Live transcript ticker -->
+          <div class="rt-ticker" id="rtTicker" aria-label="Live transcript">
+            <span class="rt-tick-label">Hearing:</span>
+            <span class="rt-tick-text" id="rtTickText">—</span>
+          </div>
+
+          <!-- Signal meters (updated every second) -->
+          <div class="rt-meters">
+            <div class="rt-meter">
+              <span class="rt-m-label">Interestingness</span>
+              <div class="rt-m-track"><span class="rt-m-fill interest" id="mInterest"></span></div>
+              <span class="rt-m-val" id="mInterestVal">—</span>
+            </div>
+            <div class="rt-meter">
+              <span class="rt-m-label">Confidence</span>
+              <div class="rt-m-track"><span class="rt-m-fill confid" id="mConfid"></span></div>
+              <span class="rt-m-val" id="mConfidVal">—</span>
+            </div>
+            <div class="rt-meter">
+              <span class="rt-m-label">Urgency</span>
+              <div class="rt-m-track"><span class="rt-m-fill urgency" id="mUrgency"></span></div>
+              <span class="rt-m-val" id="mUrgencyVal">—</span>
+            </div>
+            <div class="rt-meter topic-meter">
+              <span class="rt-m-label">Topic</span>
+              <span class="rt-topic" id="mTopic">—</span>
+            </div>
+          </div>
+
+                    <!-- Interrupt notification (read-only — fires automatically) -->
+            <div class="rt-interrupt" id="rtInterrupt" style="display:none">
+              <span class="rt-int-pill">⚡ Bench interrupts</span>
+              <span class="rt-int-reason" id="rtIntReason"></span>
+            </div>
+
+          <!-- Fallback manual input -->
+          <div class="rt-manual">
+            <textarea id="answerInput" placeholder="Or type your response here…" onkeydown="answerKey(event)"></textarea>
+            <button class="btn" id="sendBtn" onclick="submitMessage()">Answer</button>
+          </div>
         </div>
       </div>
 

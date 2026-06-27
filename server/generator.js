@@ -541,13 +541,13 @@ function debriefFallback(scenario, r, turns, used, total) {
     stronger: `Concede what cannot be held, then re-anchor: "${shorten(scenario.legalIssue, 18)}" turns on ${(scenario.dangerPoints || ['the operative words'])[0]} — and the document is with my client there.`,
   } : null;
 
-  return normalizeDebrief({
+  return {
     overall,
     diagnosis: diagnose(overall),
     subscores: { responsiveness, clarityStructure, useOfFacts, useOfAuthorities, timeDiscipline },
     feedback: feedback.slice(0, 3),
     turningPoint,
-  });
+  };
 }
 
 export function buildSummary(d, modeLabel) {
@@ -591,6 +591,212 @@ async function callAnthropic(system, userContent, maxTokens = 800) {
   if (!res.ok) throw new Error('Anthropic API HTTP ' + res.status);
   const data = await res.json();
   return (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+}
+
+/* ============================================================
+ * 4) REAL-TIME TRANSCRIPT EVALUATION
+ *    Evaluates a live partial transcript every ~1 second.
+ *    Returns interestingness, confidence, urgency, topic and
+ *    whether the bench should interrupt right now.
+ * ============================================================ */
+export async function evaluateTranscript(scenario, opts, history, partialTranscript) {
+  const r = resolveOpts(opts);
+  if (aiEnabled()) {
+    try {
+      return await evaluateTranscriptAI(scenario, r, history, partialTranscript);
+    } catch (err) {
+      console.warn('[eval] AI failed, using heuristic:', err.message);
+    }
+  }
+  return evaluateTranscriptHeuristic(scenario, partialTranscript);
+}
+
+function evalSystem(scenario, r) {
+  const persona = PERSONAS[r.persona];
+  const diff = DIFFICULTIES[r.difficulty];
+  return (
+    `You monitor an advocate's live speech during oral argument. Persona of the bench: ${persona.flavour}. ` +
+    `Difficulty: ${r.difficulty} (${diff.pressure} pressure). ` +
+    `SCENARIO: Issue: ${scenario.legalIssue}. Advocate's position: ${scenario.userPosition}. ` +
+    `Danger points: ${(scenario.dangerPoints || []).slice(0, 3).join(' | ')}.\n\n` +
+    `TASK: Read the PARTIAL transcript the advocate is speaking right now. Score it on:\n` +
+    `- interestingness (0-1): how much the bench would want to hear more vs cut in\n` +
+    `- confidence (0-1): how assured and authoritative the speech sounds\n` +
+    `- urgency (0-1): how urgently the bench needs to correct or press this point\n` +
+    `- topic: one short phrase, the legal/factual point being made right now\n` +
+    `- shouldInterrupt: true if urgency >= 0.65 AND interestingness < 0.5, else false\n` +
+    `- interruptReason: one short phrase explaining WHY to interrupt (if shouldInterrupt is true, else empty)\n\n` +
+    `Return ONLY valid JSON: {"interestingness":n,"confidence":n,"urgency":n,"topic":"...","shouldInterrupt":bool,"interruptReason":"..."}`
+  );
+}
+
+async function evaluateTranscriptAI(scenario, r, history, partialTranscript) {
+  const msgs = history
+    .filter((t) => t.role === 'advocate' || t.role === 'bench')
+    .slice(-6)
+    .map((t) => ({ role: t.role === 'advocate' ? 'user' : 'assistant', content: t.text }));
+  msgs.push({ role: 'user', content: `PARTIAL TRANSCRIPT (still speaking): "${partialTranscript}"` });
+  const out = await callAnthropic(evalSystem(scenario, r), msgs, 220);
+  const j = parseJSON(out);
+  return normalizeEval(j);
+}
+
+function evaluateTranscriptHeuristic(scenario, partialTranscript) {
+  const text = String(partialTranscript || '').toLowerCase();
+  const words = text.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+
+  // Signals that make the bench want to interrupt
+  const vagueWords = (text.match(/\b(um|uh|perhaps|maybe|possibly|i think|i believe|sort of|kind of|you know|basically)\b/g) || []).length;
+  const hasAuthority = (scenario.keyAuthorities || []).some((a) => text.includes(firstWord(a)));
+  const hasFact = (scenario.keyFacts || []).some((f) => { const w = firstWord(f); return w && text.includes(w); });
+  const hasDanger = (scenario.dangerPoints || []).some((d) => { const w = firstWord(d); return w && text.includes(w); });
+  const tooLong = wordCount > 80;
+
+  const confidence = Math.max(0.1, Math.min(1, 0.65 - (vagueWords * 0.1) + (hasAuthority ? 0.15 : 0) + (hasFact ? 0.1 : 0)));
+  const interestingness = Math.max(0.1, Math.min(1, 0.45 + (hasAuthority ? 0.2 : 0) + (hasFact ? 0.15 : 0) - (tooLong ? 0.25 : 0)));
+  const urgency = Math.max(0.05, Math.min(1, 0.3 + (vagueWords > 2 ? 0.25 : 0) + (hasDanger ? 0.2 : 0) + (tooLong ? 0.2 : 0) - (hasAuthority ? 0.15 : 0)));
+
+  const shouldInterrupt = urgency >= 0.65 && interestingness < 0.5;
+  const topic = hasDanger
+    ? shorten((scenario.dangerPoints || ['the submission'])[0], 5)
+    : hasAuthority
+      ? shorten((scenario.keyAuthorities || ['authority'])[0], 5)
+      : shorten(scenario.legalIssue || 'the point', 5);
+
+  const reasons = [];
+  if (vagueWords > 2) reasons.push('vague language — no authority or precise reference');
+  if (tooLong) reasons.push('submission running too long without reaching the point');
+  if (hasDanger) reasons.push('approaching an unfortified danger point');
+  const interruptReason = shouldInterrupt ? (reasons[0] || 'point needs sharpening') : '';
+
+  return normalizeEval({ interestingness, confidence, urgency, topic, shouldInterrupt, interruptReason });
+}
+
+function normalizeEval(j) {
+  const clamp = (v) => Math.max(0, Math.min(1, Number(v) || 0));
+  return {
+    interestingness: clamp(j.interestingness),
+    confidence: clamp(j.confidence),
+    urgency: clamp(j.urgency),
+    topic: String(j.topic || 'submission in progress').trim(),
+    shouldInterrupt: Boolean(j.shouldInterrupt),
+    interruptReason: String(j.interruptReason || '').trim(),
+  };
+}
+
+/* ============================================================
+ * 5) STREAMING BENCH TURN — yields tokens as they arrive
+ *    Falls back to the standard benchTurn if streaming fails.
+ * ============================================================ */
+export async function streamBenchTurn(scenario, opts, history, advocateMsg, onChunk) {
+  const r = resolveOpts(opts);
+  if (aiEnabled()) {
+    try {
+      return await streamBenchAI(scenario, r, history, advocateMsg, onChunk);
+    } catch (err) {
+      console.warn('[stream-bench] streaming failed, falling back:', err.message);
+    }
+  }
+  // Fallback: generate the full reply and emit it as one chunk
+  const result = benchFallback(scenario, r, history, advocateMsg);
+  onChunk(result.say, true);
+  return result;
+}
+
+async function streamBenchAI(scenario, r, history, advocateMsg, onChunk) {
+  const msgs = history
+    .filter((t) => t.role === 'advocate' || t.role === 'bench')
+    .map((t) => ({ role: t.role === 'advocate' ? 'user' : 'assistant', content: t.text }));
+  msgs.push({ role: 'user', content: advocateMsg });
+
+  // We stream the raw text and parse the JSON at the end.
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'anthropic-beta': 'messages-2023-12-15',
+    },
+    body: JSON.stringify({
+      model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      max_tokens: 600,
+      stream: true,
+      system: benchSystem(scenario, r),
+      messages: msgs,
+    }),
+  });
+
+  if (!res.ok) throw new Error('Anthropic stream HTTP ' + res.status);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let fullText = '';
+  let sayBuffer = '';
+  let sayDone = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value, { stream: true });
+    for (const line of chunk.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') break;
+      try {
+        const evt = JSON.parse(data);
+        if (evt.type === 'content_block_delta' && evt.delta?.type === 'text_delta') {
+          const token = evt.delta.text || '';
+          fullText += token;
+          // Stream only the "say" field characters as they arrive,
+          // by looking for the growing value of the "say" key.
+          if (!sayDone) {
+            sayBuffer += token;
+            // Find text inside the first "say":"..." in the growing buffer
+            const sayMatch = sayBuffer.match(/"say"\s*:\s*"((?:[^\\"]|\\.)*)/);
+            if (sayMatch) {
+              const rawSay = sayMatch[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+              // Check if the "say" value just closed (next " after the value)
+              const afterSay = sayBuffer.slice(sayBuffer.indexOf('"say"') + 6);
+              const closeIdx = findClosingQuote(afterSay);
+              if (closeIdx >= 0) {
+                sayDone = true;
+                onChunk(rawSay, true);
+              } else {
+                onChunk(rawSay, false);
+              }
+            }
+          }
+        }
+      } catch { /* malformed SSE line — skip */ }
+    }
+  }
+
+  try {
+    const parsed = parseJSON(fullText);
+    return normalizeBench(parsed);
+  } catch {
+    return normalizeBench({ say: sayBuffer || 'Develop that point.', attackType: 'Clarification', benchPressure: 'medium' });
+  }
+}
+
+// Find the closing double-quote of a JSON string value,
+// skipping over escaped characters.
+function findClosingQuote(s) {
+  // s starts just after the opening " of the value,
+  // i.e. the first char is the first char of the value.
+  const colonQuote = s.indexOf('"');
+  if (colonQuote < 0) return -1;
+  // Walk from that opening quote forward
+  let i = colonQuote + 1;
+  while (i < s.length) {
+    if (s[i] === '\\') { i += 2; continue; }
+    if (s[i] === '"') return i;
+    i++;
+  }
+  return -1;
 }
 
 /* ============================================================
